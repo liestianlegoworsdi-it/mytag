@@ -1,5 +1,5 @@
 {
-  "name": "MyTAG",
+  "name": "MyTag",
   "description": "A simple bill management app with an Android-like UI inspired by Byond (BSI), featuring bill tracking, payments, and reporting.",
   "requestFramePermissions": []
 }

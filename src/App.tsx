@@ -11,7 +11,7 @@ import {
   PieChart, 
   CheckCircle2, 
   Clock, 
-  Wallet, 
+  Hourglass, 
   ArrowUpRight, 
   ArrowDownLeft,
   Search,
@@ -111,6 +111,26 @@ export default function App() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isPayModalOpen, setIsPayModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+
+  useEffect(() => {
+    let interval: any;
+    if (isLoading) {
+      // Only reset to 0 if we were previously at 100% (a new loading session)
+      setLoadingProgress(prev => (prev === 100 ? 0 : prev));
+      
+      interval = setInterval(() => {
+        setLoadingProgress(prev => {
+          if (prev >= 95) return prev;
+          return prev + Math.floor(Math.random() * 5) + 1;
+        });
+      }, 200);
+    } else {
+      setLoadingProgress(100);
+    }
+    return () => clearInterval(interval);
+  }, [isLoading]);
+
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | BillStatus>('all');
@@ -126,8 +146,11 @@ export default function App() {
     category: ''
   });
 
+  const hasFetchedRef = React.useRef(false);
+
   useEffect(() => {
-    if (currentUser && GAS_WEBAPP_URL) {
+    if (currentUser && GAS_WEBAPP_URL && !hasFetchedRef.current) {
+      hasFetchedRef.current = true;
       fetchBills();
       fetchCategories();
     }
@@ -155,12 +178,16 @@ export default function App() {
   };
 
   const fetchBills = async (silent = false) => {
-    if (!silent) setIsLoading(true);
-    else setIsRefreshing(true);
+    if (!silent && !isLoading) setIsLoading(true);
+    else if (silent) setIsRefreshing(true);
     
     try {
       const response = await fetch(`${GAS_WEBAPP_URL}?sheet=tagihan`);
       const data = await response.json();
+      
+      // Add a small artificial delay to ensure the progress bar is visible and smooth
+      await new Promise(resolve => setTimeout(resolve, 800));
+
       if (Array.isArray(data)) {
         const formatted = data.map((b: any) => ({
           ...b,
@@ -381,11 +408,14 @@ export default function App() {
         <div className="absolute top-0 right-0 w-64 h-64 bg-yellow-300/20 rounded-full -mr-32 -mt-32 blur-3xl" />
         <div className="relative z-10">
           <div className="flex justify-between items-center mb-6">
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-                MyTAG <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
-              </h1>
-              <p className="text-teal-50 text-sm font-medium">Halo, {currentUser.name || currentUser.username}</p>
+            <div className="flex items-center gap-3">
+              <img src="/logo.png" alt="Logo" className="w-12 h-12 rounded-xl object-cover border border-white/20 shadow-lg" referrerPolicy="no-referrer" />
+              <div>
+                <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+                  MyTAG <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
+                </h1>
+                <p className="text-teal-50 text-sm font-medium">Halo, {currentUser.name || currentUser.username}</p>
+              </div>
             </div>
             <div className="flex gap-2">
               <button 
@@ -394,9 +424,6 @@ export default function App() {
               >
                 <LogOut className="w-4 h-4 text-white" />
               </button>
-              <div className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/30">
-                <Wallet className="w-5 h-5 text-yellow-300" />
-              </div>
             </div>
           </div>
 
@@ -752,34 +779,44 @@ export default function App() {
             <div className="bg-white p-8 rounded-[32px] shadow-2xl flex flex-col items-center gap-4 w-64">
               <div className="w-16 h-16 bg-teal-50 rounded-2xl flex items-center justify-center relative overflow-hidden">
                 <motion.div 
-                  className="absolute inset-0 bg-teal-500/20"
+                  className="absolute inset-0 bg-teal-500/10"
                   animate={{ 
-                    x: ["-100%", "100%"],
+                    y: ["100%", "0%"],
                   }}
+                  style={{ height: `${loadingProgress}%`, top: 'auto', bottom: 0 }}
                   transition={{ 
-                    duration: 1.5, 
-                    repeat: Infinity, 
+                    duration: 0.5, 
                     ease: "linear" 
                   }}
                 />
-                <div className="w-8 h-8 border-4 border-teal-500 border-t-transparent rounded-full animate-spin" />
+                <Hourglass className="w-8 h-8 text-teal-500 animate-pulse" />
               </div>
               <div className="text-center">
                 <p className="text-slate-800 font-bold">Sedang diproses</p>
                 <p className="text-slate-400 text-[10px] uppercase tracking-widest mt-1">Mohon tunggu sebentar</p>
               </div>
-              <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mt-2">
-                <motion.div 
-                  className="h-full bg-gradient-to-r from-lime-400 to-teal-500"
-                  animate={{ 
-                    width: ["0%", "100%"],
-                  }}
-                  transition={{ 
-                    duration: 2, 
-                    repeat: Infinity, 
-                    ease: "easeInOut" 
-                  }}
-                />
+              <div className="w-full space-y-2 mt-2">
+                <div className="flex justify-between items-center text-[10px] font-bold text-teal-600 uppercase tracking-wider">
+                  <span>Progres</span>
+                  <motion.span
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    {loadingProgress}%
+                  </motion.span>
+                </div>
+                <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+                  <motion.div 
+                    className="h-full bg-gradient-to-r from-lime-400 to-teal-500"
+                    animate={{ 
+                      width: `${loadingProgress}%`,
+                    }}
+                    transition={{ 
+                      duration: 0.5, 
+                      ease: "easeOut" 
+                    }}
+                  />
+                </div>
               </div>
             </div>
           </motion.div>
@@ -895,7 +932,7 @@ export default function App() {
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">Jumlah (IDR)</label>
                   <div className="relative">
-                    <Wallet className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <div className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 border border-slate-300 rounded-sm" />
                     <input 
                       type="number" 
                       required
@@ -1083,8 +1120,8 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6 max-w-md mx-auto shadow-2xl">
       <div className="w-full space-y-8">
         <div className="text-center">
-          <div className="w-20 h-20 bg-gradient-to-br from-lime-500 to-teal-600 rounded-3xl flex items-center justify-center mx-auto shadow-xl shadow-lime-200 mb-6">
-            <Wallet className="w-10 h-10 text-white" />
+          <div className="w-24 h-24 bg-white rounded-[32px] flex items-center justify-center mx-auto shadow-xl shadow-slate-200 mb-6 overflow-hidden border border-slate-100">
+            <img src="/logo.png" alt="Logo" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
           </div>
           <h1 className="text-3xl font-bold text-slate-900 tracking-tight">MyTAG</h1>
           <p className="text-slate-500 mt-2">Kelola tagihan Anda dengan mudah</p>
