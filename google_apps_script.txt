@@ -1,0 +1,203 @@
+// GOOGLE APPS SCRIPT FOR MyTAG INTEGRATION
+// Spreadsheet ID: 1P3SlYpzRuTu3QImCfzVnxGGOHOHpz9kuenkZ_xhp9Ek
+
+const SPREADSHEET_ID = '1P3SlYpzRuTu3QImCfzVnxGGOHOHpz9kuenkZ_xhp9Ek';
+
+function doGet(e) {
+  const sheetName = e.parameter.sheet;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(sheetName);
+  
+  if (!sheet) {
+    return createResponse({ error: 'Sheet not found: ' + sheetName });
+  }
+  
+  const data = sheet.getDataRange().getValues();
+  const rawHeaders = data[0];
+  const headers = rawHeaders.map(h => String(h).toLowerCase().trim().replace(/\s+/g, ''));
+  const rows = data.slice(1);
+  
+  const result = rows.map((row, index) => {
+    const obj = {};
+    headers.forEach((header, i) => {
+      let key = header;
+      // Map spreadsheet headers to frontend keys
+      if (key === 'id') key = 'id';
+      if (key === 'title') key = 'title';
+      if (key === 'amount') key = 'amount';
+      if (key === 'category') key = 'category';
+      if (key === 'createdat') key = 'createdAt';
+      if (key === 'createdby') key = 'createdBy';
+      if (key === 'paiddate') key = 'paidDate';
+      if (key === 'paidby') key = 'paidBy';
+      if (key === 'status') key = 'status';
+      if (key === 'nama') key = 'name'; // for user sheet
+      if (sheetName === 'kategori' && key === 'kategori') key = 'name';
+      
+      obj[key] = row[i];
+    });
+    
+    // Ensure ID exists
+    if (!obj.id) obj.id = String(index + 1);
+    
+    // Normalize status for tagihan
+    if (sheetName === 'tagihan' && obj.status) {
+      const s = String(obj.status).toLowerCase();
+      if (s === 'lunas' || s === 'paid') obj.status = 'paid';
+      else obj.status = 'unpaid';
+    }
+    
+    return obj;
+  });
+  
+  return createResponse(result);
+}
+
+function doPost(e) {
+  try {
+    const params = JSON.parse(e.postData.contents);
+    const action = params.action;
+    const sheetName = params.sheet;
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    
+    if (action === 'login') {
+      const userSheet = ss.getSheetByName('user');
+      const data = userSheet.getDataRange().getValues();
+      const rawHeaders = data[0];
+      const headers = rawHeaders.map(h => String(h).toLowerCase().trim());
+      const rows = data.slice(1);
+      
+      const usernameIdx = headers.indexOf('username');
+      const passwordIdx = headers.indexOf('password');
+      
+      if (usernameIdx === -1 || passwordIdx === -1) {
+        return createResponse({ 
+          success: false, 
+          message: 'Struktur kolom tidak valid. Pastikan ada kolom "username" dan "password". Kolom ditemukan: ' + headers.join(', ') 
+        });
+      }
+
+      const userIndex = rows.findIndex(row => {
+        const sheetUsername = String(row[usernameIdx]).trim();
+        const sheetPassword = String(row[passwordIdx]).trim();
+        return sheetUsername === String(params.username).trim() && 
+               sheetPassword === String(params.password).trim();
+      });
+      
+      if (userIndex !== -1) {
+        const userRow = rows[userIndex];
+        const userObj = {};
+        headers.forEach((header, i) => {
+          let key = header;
+          if (key === 'nama') key = 'name';
+          userObj[key] = String(userRow[i]).trim();
+        });
+        
+        if (!userObj.id) userObj.id = String(userIndex + 1);
+        
+        return createResponse({ success: true, user: userObj });
+      } else {
+        return createResponse({ success: false, message: 'Username atau password salah' });
+      }
+    }
+    
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) return createResponse({ error: 'Sheet not found' });
+    
+    const data = sheet.getDataRange().getValues();
+    const rawHeaders = data[0];
+    const headers = rawHeaders.map(h => String(h).toLowerCase().trim().replace(/\s+/g, ''));
+    
+    if (action === 'create') {
+      const newRow = new Array(headers.length).fill('');
+      headers.forEach((h, i) => {
+        let key = h;
+        if (key === 'createdat') key = 'createdAt';
+        if (key === 'createdby') key = 'createdBy';
+        
+        if (params.data[key] !== undefined) {
+          newRow[i] = params.data[key];
+        } else if (h === 'id') {
+          newRow[i] = Utilities.getUuid();
+        } else if (h === 'createdat') {
+          newRow[i] = new Date().toISOString();
+        } else if (h === 'status' && sheetName === 'tagihan') {
+          newRow[i] = 'unpaid';
+        }
+      });
+      sheet.appendRow(newRow);
+      return createResponse({ success: true, message: 'Data created' });
+    }
+    
+    if (action === 'update') {
+      const idIndex = headers.indexOf('id');
+      const rows = data.slice(1);
+      const rowIndex = rows.findIndex(row => row[idIndex] == params.id);
+      
+      if (rowIndex !== -1) {
+        const rowNum = rowIndex + 2; 
+        headers.forEach((h, i) => {
+          let key = h;
+          if (key === 'paiddate') key = 'paidDate';
+          if (key === 'paidby') key = 'paidBy';
+          
+          if (params.data[key] !== undefined) {
+            let val = params.data[key];
+            if (h === 'status' && sheetName === 'tagihan') {
+              val = val === 'paid' ? 'lunas' : 'unpaid';
+            }
+            sheet.getRange(rowNum, i + 1).setValue(val);
+          }
+        });
+        return createResponse({ success: true, message: 'Data updated' });
+      }
+      return createResponse({ error: 'ID not found' });
+    }
+    
+    if (action === 'delete') {
+      const idIndex = headers.indexOf('id');
+      const rows = data.slice(1);
+      const rowIndex = rows.findIndex(row => row[idIndex] == params.id);
+      
+      if (rowIndex !== -1) {
+        sheet.deleteRow(rowIndex + 2);
+        return createResponse({ success: true, message: 'Data deleted' });
+      }
+      return createResponse({ error: 'ID not found' });
+    }
+    
+    return createResponse({ error: 'Invalid action' });
+    
+  } catch (err) {
+    return createResponse({ error: err.toString() });
+  }
+}
+
+function createResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+// SETUP FUNCTION: Run this once to create sheets and headers
+function setupSheets() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  const sheets = [
+    { name: 'tagihan', headers: ['ID', 'Title', 'Amount', 'Category', 'Created At', 'Created By', 'Paid date', 'Paid by', 'Status'] },
+    { name: 'kategori', headers: ['id', 'name'] },
+    { name: 'user', headers: ['id', 'username', 'password', 'name', 'role'] }
+  ];
+  
+  sheets.forEach(s => {
+    let sheet = ss.getSheetByName(s.name);
+    if (!sheet) {
+      sheet = ss.insertSheet(s.name);
+    }
+    sheet.clear();
+    sheet.appendRow(s.headers);
+  });
+  
+  // Add default user
+  const userSheet = ss.getSheetByName('user');
+  userSheet.appendRow(['1', 'admin', 'admin123', 'Administrator', 'admin']);
+}
