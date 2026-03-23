@@ -46,7 +46,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Bill, BillStatus, View, User } from './types';
 
 // Configuration for Spreadsheet Integration
-const GAS_WEBAPP_URL = 'https://script.google.com/macros/s/AKfycbxGAeYlUOwLXzaKkDJeu-6Y8EkhdGHpvgu9Ac4LCAcRE6sP0rgjjKLvgqhJGDMMmRns/exec';
+const GAS_WEBAPP_URL = import.meta.env.VITE_GAS_WEBAPP_URL || 'https://script.google.com/macros/s/AKfycbxGAeYlUOwLXzaKkDJeu-6Y8EkhdGHpvgu9Ac4LCAcRE6sP0rgjjKLvgqhJGDMMmRns/exec';
 
 // Utility for tailwind classes
 function cn(...inputs: ClassValue[]) {
@@ -111,10 +111,12 @@ export default function App() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isPayModalOpen, setIsPayModalOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<'all' | BillStatus>('all');
   const [selectedBillIds, setSelectedBillIds] = useState<string[]>([]);
   const [paymentDate, setPaymentDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [selectedReportDate, setSelectedReportDate] = useState<string | null>(null);
 
   // Form state
   const [categories, setCategories] = useState<{id: string, name: string}[]>([]);
@@ -152,30 +154,31 @@ export default function App() {
     }
   };
 
-  const fetchBills = async () => {
-    setIsLoading(true);
+  const fetchBills = async (silent = false) => {
+    if (!silent) setIsLoading(true);
+    else setIsRefreshing(true);
+    
     try {
       const response = await fetch(`${GAS_WEBAPP_URL}?sheet=tagihan`);
       const data = await response.json();
       if (Array.isArray(data)) {
-        // Convert string amounts and dates back to proper types if needed
         const formatted = data.map((b: any) => ({
           ...b,
           amount: Number(b.amount)
         }));
         setBills(formatted);
+        localStorage.setItem('mytag_bills', JSON.stringify(formatted));
       }
     } catch (err) {
       console.error('Failed to fetch bills:', err);
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
   };
 
   useEffect(() => {
-    if (!GAS_WEBAPP_URL) {
-      localStorage.setItem('mytag_bills', JSON.stringify(bills));
-    }
+    localStorage.setItem('mytag_bills', JSON.stringify(bills));
   }, [bills]);
 
   const totalUnpaid = useMemo(() => 
@@ -218,8 +221,13 @@ export default function App() {
       status: 'unpaid'
     };
 
+    // Optimistic Update
+    const previousBills = [...bills];
+    setBills([bill, ...bills]);
+    setIsAddModalOpen(false);
+    setNewBill({ title: '', amount: 0, category: 'Utility' });
+
     if (GAS_WEBAPP_URL) {
-      setIsLoading(true);
       try {
         await fetch(GAS_WEBAPP_URL, {
           method: 'POST',
@@ -227,19 +235,13 @@ export default function App() {
           headers: { 'Content-Type': 'text/plain' },
           body: JSON.stringify({ action: 'create', sheet: 'tagihan', data: bill })
         });
-        // Wait a bit for GAS to process before fetching
-        setTimeout(() => fetchBills(), 1000);
+        // Sync in background
+        fetchBills(true);
       } catch (err) {
         console.error('Failed to add bill:', err);
-      } finally {
-        setIsLoading(false);
+        setBills(previousBills); // Rollback
       }
-    } else {
-      setBills([bill, ...bills]);
     }
-    
-    setIsAddModalOpen(false);
-    setNewBill({ title: '', amount: 0, category: 'Utility' });
   };
 
   const toggleStatus = async (id: string) => {
@@ -250,8 +252,13 @@ export default function App() {
     const paidDate = newStatus === 'paid' ? new Date().toISOString() : '';
     const paidBy = newStatus === 'paid' ? (currentUser?.name || currentUser?.username || 'System') : '';
 
+    // Optimistic Update
+    const previousBills = [...bills];
+    setBills(bills.map(b => 
+      b.id === id ? { ...b, status: newStatus, paidDate: paidDate || undefined, paidBy: paidBy || undefined } : b
+    ));
+
     if (GAS_WEBAPP_URL) {
-      setIsLoading(true);
       try {
         await fetch(GAS_WEBAPP_URL, {
           method: 'POST',
@@ -264,25 +271,38 @@ export default function App() {
             data: { status: newStatus, paidDate, paidBy } 
           })
         });
-        setTimeout(() => fetchBills(), 1000);
+        // Sync in background
+        fetchBills(true);
       } catch (err) {
         console.error('Failed to update bill:', err);
-      } finally {
-        setIsLoading(false);
+        setBills(previousBills); // Rollback
       }
-    } else {
-      setBills(bills.map(b => 
-        b.id === id ? { ...b, status: newStatus, paidDate: paidDate || undefined, paidBy: paidBy || undefined } : b
-      ));
     }
   };
 
   const handleMultiPay = async () => {
     if (selectedBillIds.length === 0) return;
     
+    // Optimistic Update
+    const previousBills = [...bills];
+    const updatedBills = bills.map(b => 
+      selectedBillIds.includes(b.id) 
+        ? { 
+            ...b, 
+            status: 'paid', 
+            paidDate: new Date(paymentDate).toISOString(),
+            paidBy: currentUser?.name || currentUser?.username || 'System'
+          } 
+        : b
+    );
+    setBills(updatedBills);
+    setSelectedBillIds([]);
+    setIsPayModalOpen(false);
+
     if (GAS_WEBAPP_URL) {
-      setIsLoading(true);
       try {
+        // We still show a subtle loading for multi-pay as it's multiple requests
+        setIsRefreshing(true);
         for (const id of selectedBillIds) {
           await fetch(GAS_WEBAPP_URL, {
             method: 'POST',
@@ -300,27 +320,14 @@ export default function App() {
             })
           });
         }
-        setTimeout(() => fetchBills(), 1000);
+        fetchBills(true);
       } catch (err) {
         console.error('Failed to multi-pay:', err);
+        setBills(previousBills); // Rollback
       } finally {
-        setIsLoading(false);
+        setIsRefreshing(false);
       }
-    } else {
-      setBills(bills.map(b => 
-        selectedBillIds.includes(b.id) 
-          ? { 
-              ...b, 
-              status: 'paid', 
-              paidDate: new Date(paymentDate).toISOString(),
-              paidBy: currentUser?.name || currentUser?.username || 'System'
-            } 
-          : b
-      ));
     }
-    
-    setSelectedBillIds([]);
-    setIsPayModalOpen(false);
   };
 
   const toggleSelection = (id: string) => {
@@ -330,8 +337,11 @@ export default function App() {
   };
 
   const deleteBill = async (id: string) => {
+    // Optimistic Update
+    const previousBills = [...bills];
+    setBills(bills.filter(b => b.id !== id));
+
     if (GAS_WEBAPP_URL) {
-      setIsLoading(true);
       try {
         await fetch(GAS_WEBAPP_URL, {
           method: 'POST',
@@ -339,14 +349,11 @@ export default function App() {
           headers: { 'Content-Type': 'text/plain' },
           body: JSON.stringify({ action: 'delete', sheet: 'tagihan', id })
         });
-        setTimeout(() => fetchBills(), 1000);
+        fetchBills(true);
       } catch (err) {
         console.error('Failed to delete bill:', err);
-      } finally {
-        setIsLoading(false);
+        setBills(previousBills); // Rollback
       }
-    } else {
-      setBills(bills.filter(b => b.id !== id));
     }
   };
 
@@ -505,7 +512,7 @@ export default function App() {
               <div className="flex flex-col items-center justify-center gap-1">
                 <h2 className="text-xl font-bold text-yellow-500 text-center flex items-center gap-2">
                   Daftar Tagihan
-                  {isLoading && <span className="w-4 h-4 border-2 border-teal-500 border-t-transparent rounded-full animate-spin" />}
+                  {(isLoading || isRefreshing) && <span className="w-4 h-4 border-2 border-teal-500 border-t-transparent rounded-full animate-spin" />}
                 </h2>
                 {selectedBillIds.length > 0 && (
                   <motion.div 
@@ -680,8 +687,16 @@ export default function App() {
                   })
                   .map(([date, amount]) => (
                     <div key={date} className="flex justify-between items-center p-3 bg-slate-50 rounded-2xl">
-                      <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{date}</span>
-                      <span className="text-sm font-bold text-teal-700">{formatCurrency(amount)}</span>
+                      <div className="flex flex-col">
+                        <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{date}</span>
+                        <span className="text-sm font-bold text-teal-700">{formatCurrency(amount as number)}</span>
+                      </div>
+                      <button 
+                        onClick={() => setSelectedReportDate(date)}
+                        className="p-2 bg-white text-slate-400 rounded-xl shadow-sm border border-slate-100 active:scale-95 transition-transform"
+                      >
+                        <Search className="w-5 h-5" />
+                      </button>
                     </div>
                   ))}
                   {bills.filter(b => b.status === 'paid' && b.paidDate).length === 0 && (
@@ -692,6 +707,12 @@ export default function App() {
             </motion.div>
           )}
         </AnimatePresence>
+        
+        <footer className="mt-12 mb-8 text-center">
+          <p className="text-slate-400 text-[10px] font-bold uppercase tracking-[0.2em]">
+            © 2026 MyTAG Kantin Berkah
+          </p>
+        </footer>
       </main>
 
       {/* Bottom Navigation */}
@@ -762,6 +783,71 @@ export default function App() {
               </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {selectedReportDate && (
+          <div className="fixed inset-0 z-[110] flex items-end justify-center px-4 pb-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setSelectedReportDate(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "100%" }}
+              transition={{ type: "spring", damping: 25, stiffness: 300 }}
+              className="relative w-full max-w-md bg-white rounded-[32px] p-8 shadow-2xl max-h-[80vh] flex flex-col"
+            >
+              <div className="flex justify-between items-center mb-6">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-800">Detail Pelunasan</h2>
+                  <p className="text-xs font-bold text-teal-600 uppercase tracking-widest mt-1">{selectedReportDate}</p>
+                </div>
+                <button onClick={() => setSelectedReportDate(null)} className="p-2 hover:bg-slate-100 rounded-full">
+                  <X className="w-6 h-6 text-slate-400" />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto space-y-3 pr-2 custom-scrollbar">
+                {bills
+                  .filter(b => b.status === 'paid' && b.paidDate && format(parseISO(b.paidDate), 'dd MMM yyyy') === selectedReportDate)
+                  .map(bill => (
+                    <div key={bill.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                      <div className="flex justify-between items-start mb-2">
+                        <h4 className="font-bold text-slate-800 text-sm">{bill.title}</h4>
+                        <span className="text-xs font-bold text-teal-600">{formatCurrency(bill.amount)}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-[10px] text-slate-400 font-bold uppercase tracking-wider">
+                        <span className="flex items-center gap-1">
+                          <Tag className="w-3 h-3" />
+                          {bill.category}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <UserIcon className="w-3 h-3" />
+                          {bill.paidBy || 'System'}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+
+              <div className="mt-6 pt-6 border-t border-slate-100 flex justify-between items-center">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">Total Terbayar</span>
+                <span className="text-lg font-bold text-teal-700">
+                  {formatCurrency(
+                    bills
+                      .filter(b => b.status === 'paid' && b.paidDate && format(parseISO(b.paidDate), 'dd MMM yyyy') === selectedReportDate)
+                      .reduce((sum, b) => sum + b.amount, 0)
+                  )}
+                </span>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 
@@ -1078,7 +1164,7 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         </form>
 
         <p className="text-center text-slate-400 text-xs">
-          © 2026 MyTAG Integration System
+          © 2026 MyTAG Kantin Berkah
         </p>
       </div>
     </div>
