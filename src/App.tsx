@@ -143,7 +143,7 @@ export default function App() {
   const [newBill, setNewBill] = useState<Partial<Bill>>({
     title: '',
     amount: 0,
-    category: ''
+    category: 'bahan kantin'
   });
 
   const hasFetchedRef = React.useRef(false);
@@ -168,6 +168,7 @@ export default function App() {
           name: cat.name || cat.kategori || 'Other'
         }));
         setCategories(normalized);
+        // Only set default if current category is empty
         if (normalized.length > 0 && !newBill.category) {
           setNewBill(prev => ({ ...prev, category: normalized[0].name }));
         }
@@ -242,7 +243,7 @@ export default function App() {
       id: Math.random().toString(36).substr(2, 9),
       title: newBill.title,
       amount: Number(newBill.amount),
-      category: newBill.category || 'Utility',
+      category: newBill.category || 'bahan kantin',
       createdAt: new Date().toISOString(),
       createdBy: currentUser?.name || currentUser?.username || 'System',
       status: 'unpaid'
@@ -252,7 +253,7 @@ export default function App() {
     const previousBills = [...bills];
     setBills([bill, ...bills]);
     setIsAddModalOpen(false);
-    setNewBill({ title: '', amount: 0, category: 'Utility' });
+    setNewBill({ title: '', amount: 0, category: 'bahan kantin' });
 
     if (GAS_WEBAPP_URL) {
       try {
@@ -957,6 +958,7 @@ export default function App() {
                         ))
                       ) : (
                         <>
+                          <option value="bahan kantin">Bahan Kantin</option>
                           <option value="Utility">Utility</option>
                           <option value="Housing">Housing</option>
                           <option value="Installment">Installment</option>
