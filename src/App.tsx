@@ -17,6 +17,7 @@ import {
   Search,
   Filter,
   ChevronRight,
+  ChevronLeft,
   MoreVertical,
   X,
   Calendar,
@@ -25,7 +26,11 @@ import {
   Lock,
   LogOut,
   Eye,
-  EyeOff
+  EyeOff,
+  History,
+  Receipt,
+  Wallet,
+  AlertCircle
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -39,11 +44,12 @@ import {
   PieChart as RePieChart,
   Pie
 } from 'recharts';
-import { format, parseISO, isAfter, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
+import { format, parseISO, isAfter, startOfMonth, endOfMonth, isWithinInterval, isSameMonth, subMonths, addMonths } from 'date-fns';
+import { id } from 'date-fns/locale';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { motion, AnimatePresence } from 'motion/react';
-import { Bill, BillStatus, View, User } from './types';
+import { Bill, BillStatus, View, User, PaymentRecord } from './types';
 
 // Configuration for Spreadsheet Integration
 const GAS_WEBAPP_URL = import.meta.env.VITE_GAS_WEBAPP_URL || 'https://script.google.com/macros/s/AKfycbxGAeYlUOwLXzaKkDJeu-6Y8EkhdGHpvgu9Ac4LCAcRE6sP0rgjjKLvgqhJGDMMmRns/exec';
@@ -60,41 +66,51 @@ const INITIAL_BILLS: Bill[] = [
     id: '1',
     title: 'Listrik PLN',
     amount: 450000,
+    paidAmount: 0,
     status: 'unpaid',
     category: 'Utility',
     createdAt: new Date().toISOString(),
-    createdBy: 'Administrator'
+    createdBy: 'Administrator',
+    payments: []
   },
   {
     id: '2',
     title: 'Internet Indihome',
     amount: 325000,
+    paidAmount: 325000,
     status: 'paid',
     category: 'Utility',
     createdAt: new Date().toISOString(),
     createdBy: 'Administrator',
-    paidDate: new Date().toISOString(),
-    paidBy: 'Administrator'
+    payments: [
+      { id: 'p1', amount: 325000, date: new Date().toISOString(), paidBy: 'Administrator' }
+    ]
   },
   {
     id: '3',
     title: 'Cicilan Motor',
     amount: 1200000,
-    status: 'unpaid',
+    paidAmount: 500000,
+    status: 'partial',
     category: 'Installment',
     createdAt: new Date().toISOString(),
-    createdBy: 'Administrator'
+    createdBy: 'Administrator',
+    payments: [
+      { id: 'p2', amount: 500000, date: new Date().toISOString(), paidBy: 'Administrator' }
+    ]
   },
   {
     id: '4',
     title: 'Sewa Apartemen',
     amount: 2500000,
+    paidAmount: 2500000,
     status: 'paid',
     category: 'Housing',
     createdAt: new Date().toISOString(),
     createdBy: 'Administrator',
-    paidDate: new Date().toISOString(),
-    paidBy: 'Administrator'
+    payments: [
+      { id: 'p3', amount: 2500000, date: new Date().toISOString(), paidBy: 'Administrator' }
+    ]
   }
 ];
 
@@ -110,6 +126,7 @@ export default function App() {
   const [currentView, setCurrentView] = useState<View>('home');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isPayModalOpen, setIsPayModalOpen] = useState(false);
+  const [selectedBillForDetail, setSelectedBillForDetail] = useState<Bill | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingProgress, setLoadingProgress] = useState(0);
 
@@ -137,6 +154,7 @@ export default function App() {
   const [selectedBillIds, setSelectedBillIds] = useState<string[]>([]);
   const [paymentDate, setPaymentDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [selectedReportDate, setSelectedReportDate] = useState<string | null>(null);
+  const [selectedMonth, setSelectedMonth] = useState(new Date());
 
   // Form state
   const [categories, setCategories] = useState<{id: string, name: string}[]>([]);
@@ -190,10 +208,45 @@ export default function App() {
       await new Promise(resolve => setTimeout(resolve, 800));
 
       if (Array.isArray(data)) {
-        const formatted = data.map((b: any) => ({
-          ...b,
-          amount: Number(b.amount)
-        }));
+        const formatted = data.map((b: any) => {
+          const amount = Number(b.amount) || 0;
+          let paidAmount = Number(b.paidAmount) || 0;
+          let payments = [];
+          try {
+            payments = typeof b.payments === 'string' ? JSON.parse(b.payments) : (Array.isArray(b.payments) ? b.payments : []);
+          } catch (e) {
+            payments = [];
+          }
+          
+          // Normalize status
+          let status = b.status;
+          if (status === 'Lunas') status = 'paid';
+          if (status === 'Belum Lunas') status = 'unpaid';
+          if (status === 'Sebagian') status = 'partial';
+          
+          if (!status || (paidAmount >= amount && amount > 0)) {
+            status = (paidAmount >= amount && amount > 0) ? 'paid' : (paidAmount > 0 ? 'partial' : 'unpaid');
+          }
+          
+          // Legacy data fix: If status is 'paid' but payments are empty, synthesize a payment record
+          if (status === 'paid' && payments.length === 0 && amount > 0) {
+            paidAmount = amount;
+            payments = [{
+              id: 'legacy-' + b.id,
+              amount: amount,
+              date: b.paidDate || b.createdAt,
+              paidBy: b.paidBy || 'System'
+            }];
+          }
+
+          return {
+            ...b,
+            amount,
+            paidAmount,
+            payments,
+            status
+          };
+        });
         setBills(formatted);
         localStorage.setItem('mytag_bills', JSON.stringify(formatted));
       }
@@ -210,22 +263,39 @@ export default function App() {
   }, [bills]);
 
   const totalUnpaid = useMemo(() => 
-    bills.filter(b => b.status === 'unpaid').reduce((sum, b) => sum + b.amount, 0),
+    bills.reduce((sum, b) => sum + (b.amount - (b.paidAmount || 0)), 0),
   [bills]);
 
   const totalPaid = useMemo(() => 
-    bills.filter(b => b.status === 'paid').reduce((sum, b) => sum + b.amount, 0),
+    bills.reduce((sum, b) => sum + (b.paidAmount || 0), 0),
   [bills]);
 
   const filteredBills = useMemo(() => {
     return bills
       .filter(b => {
         const matchesSearch = b.title.toLowerCase().includes(searchQuery.toLowerCase());
-        const matchesFilter = filterStatus === 'all' || b.status === filterStatus;
+        let matchesFilter = filterStatus === 'all' || b.status === filterStatus;
+        
+        // If filtering by paid, also filter by selected month
+        if (filterStatus === 'paid') {
+          const billDate = parseISO(b.createdAt);
+          matchesFilter = matchesFilter && isSameMonth(billDate, selectedMonth);
+        }
+        
         return matchesSearch && matchesFilter;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [bills, searchQuery, filterStatus]);
+  }, [bills, searchQuery, filterStatus, selectedMonth]);
+
+  const groupedBills = useMemo(() => {
+    const groups: Record<string, Bill[]> = {};
+    filteredBills.forEach(bill => {
+      const dateKey = format(parseISO(bill.createdAt), 'yyyy-MM-dd');
+      if (!groups[dateKey]) groups[dateKey] = [];
+      groups[dateKey].push(bill);
+    });
+    return groups;
+  }, [filteredBills]);
 
   const chartData = useMemo(() => {
     const categories: Record<string, number> = {};
@@ -243,10 +313,12 @@ export default function App() {
       id: Math.random().toString(36).substr(2, 9),
       title: newBill.title,
       amount: Number(newBill.amount),
+      paidAmount: 0,
       category: newBill.category || 'bahan kantin',
       createdAt: new Date().toISOString(),
       createdBy: currentUser?.name || currentUser?.username || 'System',
-      status: 'unpaid'
+      status: 'unpaid',
+      payments: []
     };
 
     // Optimistic Update
@@ -276,14 +348,22 @@ export default function App() {
     const bill = bills.find(b => b.id === id);
     if (!bill) return;
 
-    const newStatus = bill.status === 'paid' ? 'unpaid' : 'paid';
-    const paidDate = newStatus === 'paid' ? new Date().toISOString() : '';
-    const paidBy = newStatus === 'paid' ? (currentUser?.name || currentUser?.username || 'System') : '';
+    const isCurrentlyPaid = bill.status === 'paid';
+    const newStatus: BillStatus = isCurrentlyPaid ? 'unpaid' : 'paid';
+    const newPaidAmount = isCurrentlyPaid ? 0 : bill.amount;
+    const newPayments = isCurrentlyPaid ? [] : [
+      { 
+        id: Math.random().toString(36).substr(2, 9), 
+        amount: bill.amount, 
+        date: new Date().toISOString(), 
+        paidBy: currentUser?.name || currentUser?.username || 'System' 
+      }
+    ];
 
     // Optimistic Update
     const previousBills = [...bills];
     setBills(bills.map(b => 
-      b.id === id ? { ...b, status: newStatus, paidDate: paidDate || undefined, paidBy: paidBy || undefined } : b
+      b.id === id ? { ...b, status: newStatus, paidAmount: newPaidAmount, payments: newPayments } : b
     ));
 
     if (GAS_WEBAPP_URL) {
@@ -296,7 +376,11 @@ export default function App() {
             action: 'update', 
             sheet: 'tagihan', 
             id, 
-            data: { status: newStatus, paidDate, paidBy } 
+            data: { 
+              status: newStatus, 
+              paidAmount: newPaidAmount, 
+              payments: JSON.stringify(newPayments) 
+            } 
           })
         });
         // Sync in background
@@ -308,21 +392,75 @@ export default function App() {
     }
   };
 
+  const handlePartialPayment = async (billId: string, amountToPay: number) => {
+    const bill = bills.find(b => b.id === billId);
+    if (!bill) return;
+
+    const newPaidAmount = (bill.paidAmount || 0) + amountToPay;
+    const newStatus: BillStatus = newPaidAmount >= bill.amount ? 'paid' : 'partial';
+    const newPayment: PaymentRecord = {
+      id: Math.random().toString(36).substr(2, 9),
+      amount: amountToPay,
+      date: new Date().toISOString(),
+      paidBy: currentUser?.name || currentUser?.username || 'System'
+    };
+    const newPayments = [...(bill.payments || []), newPayment];
+
+    // Optimistic Update
+    const previousBills = [...bills];
+    const updatedBill = { ...bill, status: newStatus, paidAmount: newPaidAmount, payments: newPayments };
+    setBills(bills.map(b => b.id === billId ? updatedBill : b));
+    setSelectedBillForDetail(updatedBill);
+
+    if (GAS_WEBAPP_URL) {
+      try {
+        await fetch(GAS_WEBAPP_URL, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({ 
+            action: 'update', 
+            sheet: 'tagihan', 
+            id: billId, 
+            data: { 
+              status: newStatus, 
+              paidAmount: newPaidAmount, 
+              payments: JSON.stringify(newPayments) 
+            } 
+          })
+        });
+        fetchBills(true);
+      } catch (err) {
+        console.error('Failed to update partial payment:', err);
+        setBills(previousBills);
+      }
+    }
+  };
+
   const handleMultiPay = async () => {
     if (selectedBillIds.length === 0) return;
     
     // Optimistic Update
     const previousBills = [...bills];
-    const updatedBills = bills.map(b => 
-      selectedBillIds.includes(b.id) 
-        ? { 
-            ...b, 
-            status: 'paid', 
-            paidDate: new Date(paymentDate).toISOString(),
-            paidBy: currentUser?.name || currentUser?.username || 'System'
-          } 
-        : b
-    );
+    const updatedBills = bills.map(b => {
+      if (selectedBillIds.includes(b.id)) {
+        const remaining = b.amount - (b.paidAmount || 0);
+        const newPayment = {
+          id: Math.random().toString(36).substr(2, 9),
+          amount: remaining,
+          date: new Date(paymentDate).toISOString(),
+          paidBy: currentUser?.name || currentUser?.username || 'System'
+        };
+        const newPayments = [...(b.payments || []), newPayment];
+        return { 
+          ...b, 
+          status: 'paid', 
+          paidAmount: b.amount,
+          payments: newPayments
+        };
+      }
+      return b;
+    });
     setBills(updatedBills);
     setSelectedBillIds([]);
     setIsPayModalOpen(false);
@@ -332,21 +470,24 @@ export default function App() {
         // We still show a subtle loading for multi-pay as it's multiple requests
         setIsRefreshing(true);
         for (const id of selectedBillIds) {
-          await fetch(GAS_WEBAPP_URL, {
-            method: 'POST',
-            mode: 'no-cors',
-            headers: { 'Content-Type': 'text/plain' },
-            body: JSON.stringify({ 
-              action: 'update', 
-              sheet: 'tagihan', 
-              id, 
-              data: { 
-                status: 'paid', 
-                paidDate: new Date(paymentDate).toISOString(),
-                paidBy: currentUser?.name || currentUser?.username || 'System'
-              } 
-            })
-          });
+          const updatedBill = updatedBills.find(b => b.id === id);
+          if (updatedBill) {
+            await fetch(GAS_WEBAPP_URL, {
+              method: 'POST',
+              mode: 'no-cors',
+              headers: { 'Content-Type': 'text/plain' },
+              body: JSON.stringify({ 
+                action: 'update', 
+                sheet: 'tagihan', 
+                id, 
+                data: { 
+                  status: 'paid', 
+                  paidAmount: updatedBill.paidAmount, 
+                  payments: JSON.stringify(updatedBill.payments)
+                } 
+              })
+            });
+          }
         }
         fetchBills(true);
       } catch (err) {
@@ -496,7 +637,12 @@ export default function App() {
                       initial={{ opacity: 0, scale: 0.9 }}
                       animate={{ opacity: 1, scale: 1 }}
                     >
-                      <BillCard bill={bill} onToggle={toggleStatus} formatCurrency={formatCurrency} />
+                      <BillCard 
+                        bill={bill} 
+                        onToggle={toggleStatus} 
+                        formatCurrency={formatCurrency} 
+                        onClick={() => setSelectedBillForDetail(bill)}
+                      />
                     </motion.div>
                   ))}
                   {bills.filter(b => b.status === 'unpaid').length === 0 && (
@@ -580,6 +726,29 @@ export default function App() {
                 )}
               </div>
 
+              {filterStatus === 'paid' && (
+                <div className="flex items-center justify-between bg-white p-3 rounded-2xl border border-slate-100 shadow-sm">
+                  <button 
+                    onClick={() => setSelectedMonth(prev => subMonths(prev, 1))}
+                    className="p-2 hover:bg-slate-50 rounded-xl transition-colors"
+                  >
+                    <ChevronLeft className="w-5 h-5 text-slate-400" />
+                  </button>
+                  <div className="flex flex-col items-center">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Periode</span>
+                    <span className="text-sm font-bold text-slate-700 capitalize">
+                      {format(selectedMonth, 'MMMM yyyy', { locale: id })}
+                    </span>
+                  </div>
+                  <button 
+                    onClick={() => setSelectedMonth(prev => addMonths(prev, 1))}
+                    className="p-2 hover:bg-slate-50 rounded-xl transition-colors"
+                  >
+                    <ChevronRight className="w-5 h-5 text-slate-400" />
+                  </button>
+                </div>
+              )}
+
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                 <input 
@@ -591,24 +760,40 @@ export default function App() {
                 />
               </div>
 
-              <div className="space-y-3">
-                {filteredBills.map(bill => (
-                  <motion.div 
-                    key={bill.id}
-                    layout
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                  >
-                    <BillCard 
-                      bill={bill} 
-                      onToggle={toggleStatus} 
-                      onDelete={deleteBill}
-                      formatCurrency={formatCurrency}
-                      isSelected={selectedBillIds.includes(bill.id)}
-                      onSelect={() => toggleSelection(bill.id)}
-                    />
-                  </motion.div>
-                ))}
+              <div className="space-y-6">
+                {(Object.entries(groupedBills) as [string, Bill[]][])
+                  .sort(([dateA], [dateB]) => new Date(dateB).getTime() - new Date(dateA).getTime())
+                  .map(([date, billsInGroup]) => (
+                    <div key={date} className="space-y-3">
+                      <div className="flex items-center gap-3">
+                        <div className="h-px flex-1 bg-slate-100" />
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest whitespace-nowrap">
+                          {format(parseISO(date), 'EEEE, dd MMM yyyy', { locale: id })}
+                        </span>
+                        <div className="h-px flex-1 bg-slate-100" />
+                      </div>
+                      <div className="space-y-3">
+                        {billsInGroup.map(bill => (
+                          <motion.div 
+                            key={bill.id}
+                            layout
+                            initial={{ opacity: 0, scale: 0.9 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                          >
+                            <BillCard 
+                              bill={bill} 
+                              onToggle={toggleStatus} 
+                              onDelete={deleteBill}
+                              formatCurrency={formatCurrency}
+                              isSelected={selectedBillIds.includes(bill.id)}
+                              onSelect={() => toggleSelection(bill.id)}
+                              onClick={() => setSelectedBillForDetail(bill)}
+                            />
+                          </motion.div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 {filteredBills.length === 0 && (
                   <div className="text-center py-12">
                     <p className="text-slate-400 text-sm">Tidak ada tagihan ditemukan</p>
@@ -1041,6 +1226,14 @@ export default function App() {
             </motion.div>
           </div>
         )}
+        {selectedBillForDetail && (
+          <BillDetailModal 
+            bill={selectedBillForDetail}
+            onClose={() => setSelectedBillForDetail(null)}
+            onPay={(amount) => handlePartialPayment(selectedBillForDetail.id, amount)}
+            formatCurrency={formatCurrency}
+          />
+        )}
       </AnimatePresence>
     </div>
   );
@@ -1216,89 +1409,279 @@ function BillCard({
   onDelete,
   formatCurrency,
   isSelected,
-  onSelect
+  onSelect,
+  onClick
 }: { 
   bill: Bill, 
   onToggle: (id: string) => void, 
   onDelete?: (id: string) => void,
   formatCurrency: (amount: number) => string,
   isSelected?: boolean,
-  onSelect?: () => void
+  onSelect?: () => void,
+  onClick?: () => void
 }) {
+  const paidAmount = bill.paidAmount || 0;
+  const progress = (paidAmount / bill.amount) * 100;
+  const remaining = bill.amount - paidAmount;
+
   return (
     <div 
+      onClick={onClick}
       className={cn(
-        "bg-white p-4 rounded-2xl shadow-sm border transition-all flex items-center gap-4 group relative",
-        isSelected ? "border-teal-500 ring-2 ring-teal-500/10" : "border-slate-100"
+        "bg-white p-4 rounded-2xl shadow-sm border transition-all flex flex-col gap-3 group relative cursor-pointer active:scale-[0.98]",
+        isSelected ? "border-teal-500 ring-2 ring-teal-500/10" : "border-slate-100 hover:border-slate-200"
       )}
     >
-      {bill.status === 'unpaid' && onSelect && (
-        <button 
-          onClick={onSelect}
-          className={cn(
-            "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all",
-            isSelected ? "bg-lime-500 border-lime-500 text-white" : "border-slate-200 text-transparent"
-          )}
-        >
-          <CheckCircle2 className="w-4 h-4" />
-        </button>
-      )}
+      <div className="flex items-center gap-4">
+        {bill.status === 'unpaid' && onSelect && (
+          <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect();
+            }}
+            className={cn(
+              "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all shrink-0",
+              isSelected ? "bg-lime-500 border-lime-500 text-white" : "border-slate-200 text-transparent"
+            )}
+          >
+            <CheckCircle2 className="w-4 h-4" />
+          </button>
+        )}
 
-      <div className={cn(
-        "w-12 h-12 rounded-xl flex items-center justify-center shrink-0",
-        bill.status === 'paid' ? "bg-emerald-50 text-emerald-600" : "bg-yellow-50 text-yellow-600"
-      )}>
-        {bill.status === 'paid' ? <CheckCircle2 className="w-6 h-6" /> : <Clock className="w-6 h-6" />}
-      </div>
-      
-      <div className="flex-1 min-w-0">
-        <div className="flex justify-between items-start">
-          <h3 className="font-bold text-slate-800 truncate pr-2">{bill.title}</h3>
-          <span className="text-sm font-bold text-slate-900">{formatCurrency(bill.amount)}</span>
+        <div className={cn(
+          "w-12 h-12 rounded-xl flex items-center justify-center shrink-0",
+          bill.status === 'paid' ? "bg-emerald-50 text-emerald-600" : 
+          bill.status === 'partial' ? "bg-amber-50 text-amber-600" : "bg-yellow-50 text-yellow-600"
+        )}>
+          {bill.status === 'paid' ? <CheckCircle2 className="w-6 h-6" /> : 
+           bill.status === 'partial' ? <History className="w-6 h-6" /> : <Clock className="w-6 h-6" />}
         </div>
-        <div className="flex flex-col gap-1 mt-1">
-          <div className="flex items-center gap-2">
+        
+        <div className="flex-1 min-w-0">
+          <div className="flex justify-between items-start">
+            <h3 className="font-bold text-slate-800 truncate pr-2">{bill.title}</h3>
+            <span className="text-sm font-bold text-slate-900">{formatCurrency(bill.amount)}</span>
+          </div>
+          <div className="flex items-center gap-2 mt-1">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{bill.category}</span>
             <span className="w-1 h-1 bg-slate-200 rounded-full" />
             <span className={cn(
               "text-[10px] font-bold uppercase tracking-wider",
-              bill.status === 'paid' ? "text-emerald-500" : "text-orange-500"
+              bill.status === 'paid' ? "text-emerald-500" : 
+              bill.status === 'partial' ? "text-amber-500" : "text-orange-500"
             )}>
-              {bill.status === 'paid' ? 'Lunas' : 'Belum Lunas'}
+              {bill.status === 'paid' ? 'Lunas' : 
+               bill.status === 'partial' ? 'Sebagian' : 'Belum Lunas'}
             </span>
           </div>
-          <div className="text-[9px] text-slate-400">
-            Dibuat: {format(parseISO(bill.createdAt), 'dd MMM yyyy')} oleh {bill.createdBy}
-          </div>
-          {bill.status === 'paid' && bill.paidDate && (
-            <div className="text-[9px] text-emerald-500 font-medium">
-              Dibayar: {format(parseISO(bill.paidDate), 'dd MMM yyyy')} oleh {bill.paidBy}
-            </div>
-          )}
+        </div>
+
+        <div className="flex flex-col gap-2 shrink-0">
+          <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle(bill.id);
+            }}
+            className={cn(
+              "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors",
+              bill.status === 'paid' 
+                ? "bg-slate-100 text-slate-500 hover:bg-slate-200" 
+                : "bg-gradient-to-r from-lime-500 to-teal-600 text-white hover:opacity-90"
+            )}
+          >
+            {bill.status === 'paid' ? 'Batal' : 'Lunas'}
+          </button>
         </div>
       </div>
 
-      <div className="flex flex-col gap-2">
-        <button 
-          onClick={() => onToggle(bill.id)}
-          className={cn(
-            "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors",
-            bill.status === 'paid' 
-              ? "bg-slate-100 text-slate-500 hover:bg-slate-200" 
-              : "bg-gradient-to-r from-lime-500 to-teal-600 text-white hover:opacity-90"
-          )}
-        >
-          {bill.status === 'paid' ? 'Batal' : 'Bayar'}
-        </button>
+      {/* Progress Bar for Partial Payments */}
+      {(bill.status === 'partial' || (paidAmount > 0 && bill.status !== 'paid')) && (
+        <div className="space-y-1.5">
+          <div className="flex justify-between text-[9px] font-bold uppercase tracking-wider text-slate-400">
+            <span>Terbayar: {formatCurrency(paidAmount)}</span>
+            <span>Sisa: {formatCurrency(remaining)}</span>
+          </div>
+          <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
+            <motion.div 
+              initial={{ width: 0 }}
+              animate={{ width: `${progress}%` }}
+              className="h-full bg-gradient-to-r from-lime-400 to-teal-500"
+            />
+          </div>
+        </div>
+      )}
+
+      <div className="flex justify-between items-center pt-1 border-t border-slate-50">
+        <div className="text-[9px] text-slate-400">
+          {format(parseISO(bill.createdAt), 'dd MMM yyyy')} • {bill.createdBy}
+        </div>
         {onDelete && (
           <button 
-            onClick={() => onDelete(bill.id)}
-            className="text-slate-300 hover:text-red-500 transition-colors self-center"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(bill.id);
+            }}
+            className="text-slate-300 hover:text-red-500 transition-colors p-1"
           >
-            <X className="w-4 h-4" />
+            <X className="w-3.5 h-3.5" />
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function BillDetailModal({ 
+  bill, 
+  onClose, 
+  onPay,
+  formatCurrency 
+}: { 
+  bill: Bill, 
+  onClose: () => void, 
+  onPay: (amount: number) => void,
+  formatCurrency: (amount: number) => string 
+}) {
+  const [payAmount, setPayAmount] = useState<string>('');
+  const remaining = bill.amount - (bill.paidAmount || 0);
+
+  useEffect(() => {
+    setPayAmount(remaining.toString());
+  }, [remaining]);
+
+  const handlePay = (e: React.FormEvent) => {
+    e.preventDefault();
+    const amount = Number(payAmount);
+    if (isNaN(amount) || amount <= 0 || amount > remaining) return;
+    onPay(amount);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[150] flex items-center justify-center px-4">
+      <motion.div 
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        onClick={onClose}
+        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+      />
+      <motion.div 
+        initial={{ scale: 0.9, opacity: 0, y: 20 }}
+        animate={{ scale: 1, opacity: 1, y: 0 }}
+        exit={{ scale: 0.9, opacity: 0, y: 20 }}
+        className="relative w-full max-w-md bg-white rounded-[32px] overflow-hidden shadow-2xl flex flex-col max-h-[90vh]"
+      >
+        <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+          <div>
+            <h2 className="text-xl font-bold text-slate-800">{bill.title}</h2>
+            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">{bill.category}</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-white rounded-full shadow-sm transition-all">
+            <X className="w-5 h-5 text-slate-400" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6 space-y-6 custom-scrollbar">
+          {/* Summary Cards */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
+              <div className="text-slate-400 text-[9px] font-bold uppercase mb-1">Total Tagihan</div>
+              <div className="text-lg font-bold text-slate-800">{formatCurrency(bill.amount)}</div>
+            </div>
+            <div className="bg-teal-50 p-4 rounded-2xl border border-teal-100">
+              <div className="text-teal-600 text-[9px] font-bold uppercase mb-1">Sisa Tagihan</div>
+              <div className="text-lg font-bold text-teal-700">{formatCurrency(remaining)}</div>
+            </div>
+          </div>
+
+          {/* Payment Form or Success State */}
+          {remaining > 0 ? (
+            <div className="bg-white p-5 rounded-2xl border-2 border-dashed border-slate-200 space-y-4">
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                <Wallet className="w-4 h-4 text-teal-600" />
+                Bayar Tagihan
+              </h3>
+              <form onSubmit={handlePay} className="space-y-3">
+                <div className="relative">
+                  <div className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-sm">Rp</div>
+                  <input 
+                    type="number" 
+                    value={payAmount}
+                    onChange={e => setPayAmount(e.target.value)}
+                    max={remaining}
+                    min={1}
+                    className="w-full bg-slate-50 border-none rounded-xl py-3 pl-10 pr-4 text-sm font-bold focus:ring-2 focus:ring-teal-500"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  {[0.25, 0.5, 1].map(percent => (
+                    <button
+                      key={percent}
+                      type="button"
+                      onClick={() => setPayAmount(Math.round(remaining * percent).toString())}
+                      className="flex-1 py-1.5 rounded-lg bg-slate-100 text-[10px] font-bold text-slate-600 hover:bg-slate-200 transition-colors"
+                    >
+                      {percent === 1 ? 'Lunas' : `${percent * 100}%`}
+                    </button>
+                  ))}
+                </div>
+                <button 
+                  type="submit"
+                  className="w-full bg-gradient-to-r from-lime-500 to-teal-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-lime-100 active:scale-95 transition-transform"
+                >
+                  Bayar Sekarang
+                </button>
+              </form>
+            </div>
+          ) : (
+            <div className="bg-emerald-50 p-6 rounded-2xl border border-emerald-100 text-center space-y-2">
+              <div className="w-12 h-12 bg-emerald-500 text-white rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-200">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <h3 className="text-emerald-900 font-bold">Tagihan Lunas</h3>
+              <p className="text-emerald-600 text-[10px] font-medium uppercase tracking-wider">Seluruh pembayaran telah diselesaikan</p>
+            </div>
+          )}
+
+          {/* Payment History */}
+          <div className="space-y-3">
+            <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+              <History className="w-4 h-4 text-slate-400" />
+              Riwayat Pembayaran
+            </h3>
+            <div className="space-y-2">
+              {bill.payments && bill.payments.length > 0 ? (
+                bill.payments.map((payment, idx) => (
+                  <div key={payment.id} className="flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-100">
+                    <div className="w-8 h-8 rounded-lg bg-white flex items-center justify-center shadow-sm shrink-0">
+                      <Receipt className="w-4 h-4 text-teal-600" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-bold text-slate-800">{formatCurrency(payment.amount)}</span>
+                        <span className="text-[9px] text-slate-400 font-medium">{format(parseISO(payment.date), 'dd MMM yyyy, HH:mm')}</span>
+                      </div>
+                      <div className="text-[9px] text-slate-500 mt-0.5">Oleh: {payment.paidBy}</div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-8 bg-slate-50 rounded-2xl border border-dashed border-slate-200">
+                  <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                  <p className="text-[10px] font-medium text-slate-400 uppercase tracking-widest">Belum ada pembayaran</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        
+        <div className="p-6 bg-slate-50 border-t border-slate-100">
+          <div className="flex justify-between items-center text-[10px] text-slate-400 font-medium">
+            <span>ID: {bill.id}</span>
+            <span>Dibuat: {format(parseISO(bill.createdAt), 'dd/MM/yyyy')}</span>
+          </div>
+        </div>
+      </motion.div>
     </div>
   );
 }

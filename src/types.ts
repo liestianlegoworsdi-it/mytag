@@ -1,14 +1,21 @@
-export type BillStatus = 'paid' | 'unpaid';
+export type BillStatus = 'paid' | 'unpaid' | 'partial';
+
+export interface PaymentRecord {
+  id: string;
+  amount: number;
+  date: string;
+  paidBy: string;
+}
 
 export interface Bill {
   id: string;
   title: string;
   amount: number;
+  paidAmount: number;
   category: string;
   createdAt: string;
   createdBy: string;
-  paidDate?: string;
-  paidBy?: string;
+  payments?: PaymentRecord[];
   status: BillStatus;
 }
 
