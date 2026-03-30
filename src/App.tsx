@@ -239,12 +239,29 @@ export default function App() {
             }];
           }
 
+          // Ensure paidDate and paidBy exist for paid bills to show in reports
+          let paidDate = b.paidDate;
+          let paidBy = b.paidBy;
+          
+          if (status === 'paid' && !paidDate) {
+            if (payments.length > 0) {
+              const lastPayment = payments[payments.length - 1];
+              paidDate = lastPayment.date;
+              paidBy = paidBy || lastPayment.paidBy;
+            } else {
+              paidDate = b.createdAt;
+              paidBy = paidBy || b.createdBy || 'System';
+            }
+          }
+
           return {
             ...b,
             amount,
             paidAmount,
             payments,
-            status
+            status,
+            paidDate,
+            paidBy
           };
         });
         setBills(formatted);
@@ -351,19 +368,28 @@ export default function App() {
     const isCurrentlyPaid = bill.status === 'paid';
     const newStatus: BillStatus = isCurrentlyPaid ? 'unpaid' : 'paid';
     const newPaidAmount = isCurrentlyPaid ? 0 : bill.amount;
+    const now = new Date().toISOString();
+    const newPaidBy = currentUser?.name || currentUser?.username || 'System';
     const newPayments = isCurrentlyPaid ? [] : [
       { 
         id: Math.random().toString(36).substr(2, 9), 
         amount: bill.amount, 
-        date: new Date().toISOString(), 
-        paidBy: currentUser?.name || currentUser?.username || 'System' 
+        date: now, 
+        paidBy: newPaidBy
       }
     ];
 
     // Optimistic Update
     const previousBills = [...bills];
     setBills(bills.map(b => 
-      b.id === id ? { ...b, status: newStatus, paidAmount: newPaidAmount, payments: newPayments } : b
+      b.id === id ? { 
+        ...b, 
+        status: newStatus, 
+        paidAmount: newPaidAmount, 
+        payments: newPayments,
+        paidDate: isCurrentlyPaid ? undefined : now,
+        paidBy: isCurrentlyPaid ? undefined : newPaidBy
+      } : b
     ));
 
     if (GAS_WEBAPP_URL) {
@@ -379,7 +405,9 @@ export default function App() {
             data: { 
               status: newStatus, 
               paidAmount: newPaidAmount, 
-              payments: JSON.stringify(newPayments) 
+              payments: JSON.stringify(newPayments),
+              paidDate: isCurrentlyPaid ? '' : now,
+              paidBy: isCurrentlyPaid ? '' : newPaidBy
             } 
           })
         });
@@ -398,17 +426,26 @@ export default function App() {
 
     const newPaidAmount = (bill.paidAmount || 0) + amountToPay;
     const newStatus: BillStatus = newPaidAmount >= bill.amount ? 'paid' : 'partial';
+    const now = new Date().toISOString();
+    const newPaidBy = currentUser?.name || currentUser?.username || 'System';
     const newPayment: PaymentRecord = {
       id: Math.random().toString(36).substr(2, 9),
       amount: amountToPay,
-      date: new Date().toISOString(),
-      paidBy: currentUser?.name || currentUser?.username || 'System'
+      date: now,
+      paidBy: newPaidBy
     };
     const newPayments = [...(bill.payments || []), newPayment];
 
     // Optimistic Update
     const previousBills = [...bills];
-    const updatedBill = { ...bill, status: newStatus, paidAmount: newPaidAmount, payments: newPayments };
+    const updatedBill = { 
+      ...bill, 
+      status: newStatus, 
+      paidAmount: newPaidAmount, 
+      payments: newPayments,
+      paidDate: newStatus === 'paid' ? now : bill.paidDate,
+      paidBy: newStatus === 'paid' ? newPaidBy : bill.paidBy
+    };
     setBills(bills.map(b => b.id === billId ? updatedBill : b));
     setSelectedBillForDetail(updatedBill);
 
@@ -425,7 +462,9 @@ export default function App() {
             data: { 
               status: newStatus, 
               paidAmount: newPaidAmount, 
-              payments: JSON.stringify(newPayments) 
+              payments: JSON.stringify(newPayments),
+              paidDate: newStatus === 'paid' ? now : bill.paidDate,
+              paidBy: newStatus === 'paid' ? newPaidBy : bill.paidBy
             } 
           })
         });
@@ -445,18 +484,22 @@ export default function App() {
     const updatedBills = bills.map(b => {
       if (selectedBillIds.includes(b.id)) {
         const remaining = b.amount - (b.paidAmount || 0);
+        const now = new Date(paymentDate).toISOString();
+        const newPaidBy = currentUser?.name || currentUser?.username || 'System';
         const newPayment = {
           id: Math.random().toString(36).substr(2, 9),
           amount: remaining,
-          date: new Date(paymentDate).toISOString(),
-          paidBy: currentUser?.name || currentUser?.username || 'System'
+          date: now,
+          paidBy: newPaidBy
         };
         const newPayments = [...(b.payments || []), newPayment];
         return { 
           ...b, 
           status: 'paid', 
           paidAmount: b.amount,
-          payments: newPayments
+          payments: newPayments,
+          paidDate: now,
+          paidBy: newPaidBy
         };
       }
       return b;
@@ -483,7 +526,9 @@ export default function App() {
                 data: { 
                   status: 'paid', 
                   paidAmount: updatedBill.paidAmount, 
-                  payments: JSON.stringify(updatedBill.payments)
+                  payments: JSON.stringify(updatedBill.payments),
+                  paidDate: updatedBill.paidDate,
+                  paidBy: updatedBill.paidBy
                 } 
               })
             });
@@ -639,7 +684,6 @@ export default function App() {
                     >
                       <BillCard 
                         bill={bill} 
-                        onToggle={toggleStatus} 
                         formatCurrency={formatCurrency} 
                         onClick={() => setSelectedBillForDetail(bill)}
                       />
@@ -886,32 +930,29 @@ export default function App() {
                     bills
                       .filter(b => b.status === 'paid' && b.paidDate)
                       .reduce((acc, b) => {
-                        const date = format(parseISO(b.paidDate!), 'dd MMM yyyy');
-                        acc[date] = (acc[date] || 0) + b.amount;
+                        const dateKey = format(parseISO(b.paidDate!), 'yyyy-MM-dd');
+                        acc[dateKey] = (acc[dateKey] || 0) + b.amount;
                         return acc;
                       }, {} as Record<string, number>)
                   )
-                  .sort((a, b) => {
-                    try {
-                      return parseISO(b[0]).getTime() - parseISO(a[0]).getTime();
-                    } catch {
-                      return 0;
-                    }
-                  })
-                  .map(([date, amount]) => (
-                    <div key={date} className="flex justify-between items-center p-3 bg-slate-50 rounded-2xl">
-                      <div className="flex flex-col">
-                        <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{date}</span>
-                        <span className="text-sm font-bold text-teal-700">{formatCurrency(amount as number)}</span>
+                  .sort((a, b) => b[0].localeCompare(a[0]))
+                  .map(([dateKey, amount]) => {
+                    const displayDate = format(parseISO(dateKey), 'dd MMM yyyy');
+                    return (
+                      <div key={dateKey} className="flex justify-between items-center p-3 bg-slate-50 rounded-2xl">
+                        <div className="flex flex-col">
+                          <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{displayDate}</span>
+                          <span className="text-sm font-bold text-teal-700">{formatCurrency(amount as number)}</span>
+                        </div>
+                        <button 
+                          onClick={() => setSelectedReportDate(displayDate)}
+                          className="p-2 bg-white text-slate-400 rounded-xl shadow-sm border border-slate-100 active:scale-95 transition-transform"
+                        >
+                          <Search className="w-5 h-5" />
+                        </button>
                       </div>
-                      <button 
-                        onClick={() => setSelectedReportDate(date)}
-                        className="p-2 bg-white text-slate-400 rounded-xl shadow-sm border border-slate-100 active:scale-95 transition-transform"
-                      >
-                        <Search className="w-5 h-5" />
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                   {bills.filter(b => b.status === 'paid' && b.paidDate).length === 0 && (
                     <p className="text-center text-slate-400 text-xs py-4">Belum ada data pelunasan</p>
                   )}
@@ -1413,7 +1454,7 @@ function BillCard({
   onClick
 }: { 
   bill: Bill, 
-  onToggle: (id: string) => void, 
+  onToggle?: (id: string) => void, 
   onDelete?: (id: string) => void,
   formatCurrency: (amount: number) => string,
   isSelected?: boolean,
@@ -1477,20 +1518,22 @@ function BillCard({
         </div>
 
         <div className="flex flex-col gap-2 shrink-0">
-          <button 
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggle(bill.id);
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors",
-              bill.status === 'paid' 
-                ? "bg-slate-100 text-slate-500 hover:bg-slate-200" 
-                : "bg-gradient-to-r from-lime-500 to-teal-600 text-white hover:opacity-90"
-            )}
-          >
-            {bill.status === 'paid' ? 'Batal' : 'Lunas'}
-          </button>
+          {onToggle && (
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle(bill.id);
+              }}
+              className={cn(
+                "px-3 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider transition-colors",
+                bill.status === 'paid' 
+                  ? "bg-slate-100 text-slate-500 hover:bg-slate-200" 
+                  : "bg-gradient-to-r from-lime-500 to-teal-600 text-white hover:opacity-90"
+              )}
+            >
+              {bill.status === 'paid' ? 'Batal' : 'Lunas'}
+            </button>
+          )}
         </div>
       </div>
 

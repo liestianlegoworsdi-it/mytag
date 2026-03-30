@@ -17,6 +17,8 @@ export interface Bill {
   createdBy: string;
   payments?: PaymentRecord[];
   status: BillStatus;
+  paidDate?: string;
+  paidBy?: string;
 }
 
 export interface User {
